@@ -427,52 +427,9 @@ kubectl get cnp -n $APP_NAMESPACE
 
 All 4 should show `VALID=True`.
 
----
+### 3f. Azure WAF policy on the AGC Gateway
 
-## 4. Run the tests
-
-### Set up the test variables
-
-Grab the AGC FQDN once. Every test below pins to this IP via `curl --resolve` since you don't own `*.example.com`:
-
-```bash
-FQDN=$(kubectl get gateway gateway-01 -n $APP_NAMESPACE -o jsonpath='{.status.addresses[0].value}')
-IP=$(getent hosts "$FQDN" | awk '{print $1}' | head -1)
-echo "$FQDN -> $IP"
-```
-
-Both values should be populated. The IP is in a Microsoft-owned range; in production always use the FQDN, not the IP.
-
-### 4a. Multi-site routing (AGC)
-
-One AGC public FQDN, three different hostnames, three different backend pods. AGC routes each request based purely on the `Host:` header.
-
-```bash
-for h in contoso fabrikam adventure; do
-  echo "[$h.example.com]"
-  curl -s --resolve $h.example.com:80:$IP http://$h.example.com/
-  echo
-done
-```
-
-**Expected output:**
-
-```text
-[contoso.example.com]
-<html><body><h1>Hello from Contoso</h1><p>Served from contoso.example backend</p></body></html>
-
-[fabrikam.example.com]
-<html><body><h1>Hello from Fabrikam</h1><p>Served from fabrikam.example backend</p></body></html>
-
-[adventure.example.com]
-<html><body><h1>Hello from Adventure Works</h1><p>Served from adventure.example backend</p></body></html>
-```
-
-**What this proves:** same public IP for all three; only `Host:` differs. AGC is doing L7 hostname-based routing on a single managed frontend.
-
-### 4a-bonus. Add Azure WAF to AGC
-
-Azure WAF on AGC is an AGC-only capability — there's no DIY ingress controller path to it. Once enabled, AGC inspects each request against the Azure-managed **Default Rule Set (DRS) 2.1** (the only ruleset AGC WAF supports — no OWASP, no Bot Manager) and rejects malicious requests at the edge. The pod never sees them.
+Wire up Azure WAF on the Gateway as part of setup so the test in 4a-bonus is just two `curl`s. WAF on AGC is an AGC-only capability — there's no DIY ingress controller path to it. AGC inspects each request against the Azure-managed **Default Rule Set (DRS) 2.1** (the only ruleset AGC WAF supports — no OWASP, no Bot Manager) and rejects malicious requests at the edge. The pod never sees them.
 
 The wiring is two pieces:
 
@@ -487,8 +444,6 @@ The wiring is two pieces:
 - `add DRS` fails with `HasMultiplePrimaryRuleSets` (can't add a second one).
 
 So you create with the forced OWASP, then **swap the entire `managedRuleSets` array atomically** in one `update`.
-
-#### Setup
 
 ```bash
 # 1a. Create the policy if it doesn't already exist (idempotent — re-running create
@@ -582,9 +537,56 @@ kubectl get webapplicationfirewallpolicy -n $APP_NAMESPACE agc-gateway-waf \
 > az aks get-credentials -g "$RESOURCE_GROUP" -n "$AKS_NAME" --overwrite-existing
 > ```
 
-#### Run the tests
+`Programmed=True` confirms WAF is live on the Gateway — proceed to step 4.
 
-> **If you're in a fresh Cloud Shell tab**, re-export `$APP_NAMESPACE` and re-derive `$IP` first, otherwise curl returns `000`:
+---
+
+## 4. Run the tests
+
+### Set up the test variables
+
+Grab the AGC FQDN once. Every test below pins to this IP via `curl --resolve` since you don't own `*.example.com`:
+
+```bash
+FQDN=$(kubectl get gateway gateway-01 -n $APP_NAMESPACE -o jsonpath='{.status.addresses[0].value}')
+IP=$(getent hosts "$FQDN" | awk '{print $1}' | head -1)
+echo "$FQDN -> $IP"
+```
+
+Both values should be populated. The IP is in a Microsoft-owned range; in production always use the FQDN, not the IP.
+
+### 4a. Multi-site routing (AGC)
+
+One AGC public FQDN, three different hostnames, three different backend pods. AGC routes each request based purely on the `Host:` header.
+
+```bash
+for h in contoso fabrikam adventure; do
+  echo "[$h.example.com]"
+  curl -s --resolve $h.example.com:80:$IP http://$h.example.com/
+  echo
+done
+```
+
+**Expected output:**
+
+```text
+[contoso.example.com]
+<html><body><h1>Hello from Contoso</h1><p>Served from contoso.example backend</p></body></html>
+
+[fabrikam.example.com]
+<html><body><h1>Hello from Fabrikam</h1><p>Served from fabrikam.example backend</p></body></html>
+
+[adventure.example.com]
+<html><body><h1>Hello from Adventure Works</h1><p>Served from adventure.example backend</p></body></html>
+```
+
+**What this proves:** same public IP for all three; only `Host:` differs. AGC is doing L7 hostname-based routing on a single managed frontend.
+
+### 4a-bonus. Add Azure WAF to AGC
+
+WAF was wired up in step 3f. The `WebApplicationFirewallPolicy` CRD is `Programmed=True` and the policy is scoped to the whole Gateway, so all three tenants are protected by DRS 2.1. This test sends one benign request (should still succeed) and two malicious requests (should be blocked at AGC, not Cilium).
+
+> **If you're running this in a *fresh* Cloud Shell tab, `$APP_NAMESPACE` and `$IP` won't be set.** Cloud Shell tabs are independent shell processes — each tab has its own environment. The block below re-exports the namespace and re-derives the AGC FQDN+IP so `curl --resolve` has something to pin to. The `dig` fallback covers the case where `getent` returns empty (occasional in Cloud Shell). Skip this if you're still in the same tab as step 4a.
 >
 > ```bash
 > export APP_NAMESPACE="agc-sites"
