@@ -429,21 +429,21 @@ All 4 should show `VALID=True`.
 
 ### 3f. Azure WAF policy on the AGC Gateway
 
-Wire up Azure WAF on the Gateway as part of setup so the test in 4a-bonus is just two `curl`s. WAF on AGC is an AGC-only capability — there's no DIY ingress controller path to it. AGC inspects each request against the Azure-managed **Default Rule Set (DRS) 2.1** (the only ruleset AGC WAF supports — no OWASP, no Bot Manager) and rejects malicious requests at the edge. The pod never sees them.
+**Why this step matters:** AGC is your managed L7 front door. Azure WAF is the security feature that lives *on* that front door — it inspects every request before AGC forwards it to a pod. **Native Azure WAF on AKS L7 ingress is only available through AGC** — a DIY ingress controller running on cluster nodes doesn't integrate with Azure WAF. So if you want WAF as part of your AKS posture, AGC is the path.
 
-The wiring is two pieces:
+WAF and ACNS L7 are complementary, not redundant:
+
+- **AGC WAF** blocks **signature-based attacks from the internet** — SQLi, XSS, path traversal, OWASP top-10 patterns. The pod never sees these requests.
+- **ACNS L7** blocks **behavioral misuse from any source** (internet *or* compromised pod) — wrong HTTP method, wrong path, lateral movement. AGC WAF can't see internal traffic; ACNS can.
+
+You need both for a complete posture.
+
+**What this step does:** create an Azure WAF policy with the managed **Default Rule Set 2.1** (the same signatures Front Door and standalone App Gateway WAF use), then attach it to your Gateway via a Kubernetes-side CRD. Two pieces of wiring:
 
 1. An Azure-side `Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies` resource that holds the rules.
 2. A Kubernetes-side `WebApplicationFirewallPolicy` CRD that points the ALB Controller at it (scoped to the entire `Gateway`, a specific listener, or a specific `HTTPRoute`).
 
-#### Why a single atomic ruleset swap
-
-`az ... waf-policy create` requires `--type/--version` and only accepts OWASP. AGC WAF only supports DRS 2.1. You can't fix this in two steps because:
-
-- `remove OWASP` fails with `NoValidPrimaryRuleSetsAttached` (a policy must always have one primary).
-- `add DRS` fails with `HasMultiplePrimaryRuleSets` (can't add a second one).
-
-So you create with the forced OWASP, then **swap the entire `managedRuleSets` array atomically** in one `update`.
+We scope the CRD to the whole Gateway, so all three tenants (contoso, fabrikam, adventure) are protected. WAF runs in **Prevention** mode in production and **Detection** mode for tuning — one CLI flag flips between them.
 
 ```bash
 # 1a. Create the policy if it doesn't already exist (idempotent — re-running create
