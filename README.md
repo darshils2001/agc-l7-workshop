@@ -44,6 +44,8 @@ export APP_NAMESPACE="agc-sites"
 az account set --subscription "$SUBSCRIPTION_ID"
 ```
 
+> **Region tip:** AGC is multi-region, but during this walkthrough's build `westus3` was reliable while `eastus2` returned transient AGC subnet-association errors (`Microsoft.ServiceNetworking`). If `kubectl wait` on the `ApplicationLoadBalancer` in step 3b sits on `Updating` for >10 min, that's typically a regional backend issue — switch regions and retry from step 0.
+
 ---
 
 ## 1. Register providers, install CLI extensions, create RG
@@ -75,7 +77,7 @@ Single `az aks create` that turns on every relevant feature: Cilium dataplane, A
 | `--network-plugin azure --network-plugin-mode overlay` | Pods get IPs from a non-routable overlay; keeps your VNet plan small. |
 | `--network-dataplane cilium` | Replaces kube-proxy/iptables with Cilium's eBPF dataplane. Required for L7. |
 | `--enable-acns --acns-advanced-networkpolicies L7` | Turns on ACNS L7 — Cilium now understands HTTP method/path/header rules. |
-| `--enable-application-load-balancer` | Installs the AGC add-on (`alb-controller` pods in `kube-system`). |
+| `--enable-application-load-balancer` | Installs the AGC add-on (`alb-controller` pods in `kube-system`). AKS owns the controller image, the workload-identity federation, the delegated subnet (`aks-appgateway` in the `MC_*` RG), and the AGC resource. There's no Helm chart and no manual identity glue — but you also can't customize the controller image. |
 | `--enable-gateway-api` | Installs upstream Gateway API CRDs and registers `azure-alb-external` GatewayClass. |
 | `--enable-oidc-issuer --enable-workload-identity` | Required so AGC's controller authenticates to Azure as a workload identity. |
 
@@ -300,6 +302,8 @@ One `Gateway` (`gateway-01`) with a single HTTP listener on port 80, plus three 
 The annotations link the Gateway to the `ApplicationLoadBalancer` from 3b — that's how the controller knows which AGC resource to program.
 
 You don't need to own these hostnames; we use `curl --resolve` later to forge the `Host:` header. In a real deployment you'd point DNS A/AAAA records at the AGC FQDN.
+
+> **If your `HTTPRoute` and backend `Service` live in different namespaces**, add a `ReferenceGrant` in the Service's namespace so the Route is allowed to refer across the boundary. This walkthrough keeps both in `agc-sites` so a grant isn't needed, but production multi-tenant setups usually need one.
 
 ```bash
 kubectl apply -f - <<EOF
@@ -769,7 +773,7 @@ xx drop (Policy denied) flow 0x4f3a2b1c to endpoint 4521, ifindex 12, file bpf_l
 - The decision is rendered **in the kernel** by Cilium's eBPF programs (note `file bpf_lxc.c:1843`).
 - Cilium **synthesized the 403** — nginx never saw the request.
 - Enforcement is **identity-based**, not IP-based (`identity 2->4521`). Pod restarts and reschedules don't break the rule.
-- Every drop is observable through the same stream that feeds Hubble, Container Insights, and Azure Monitor for AKS.
+- Every drop is observable through the same stream that feeds **Hubble** (and Hubble UI), **Container Insights**, and **Azure Monitor for AKS** — so you don't lose visibility when you turn on policy, you gain a dimension of it.
 
 ---
 
@@ -788,6 +792,17 @@ az group delete -n "$RESOURCE_GROUP" --yes --no-wait
 - **Idle timeout:** Cloud Shell disconnects after about 20 minutes of inactivity. On reconnect, re-run the variable block from step 0 plus `az aks get-credentials`.
 - **Variables don't persist across sessions or tabs.** Each new tab needs the variables re-exported.
 - **Persistent storage:** Cloud Shell mounts `~/clouddrive` if you want to save snippets to a file.
+
+---
+
+## Resources
+
+- AKS + Cilium L7 policies — <https://learn.microsoft.com/azure/aks/how-to-apply-l7-policies> (short link: <https://aka.ms/aks/l7-policies>)
+- AGC ALB Controller add-on quickstart — <https://learn.microsoft.com/azure/application-gateway/for-containers/quickstart-deploy-application-gateway-for-containers-alb-controller-addon>
+- AGC multi-site hosting via Gateway API — <https://learn.microsoft.com/azure/application-gateway/for-containers/how-to-multiple-site-hosting-gateway-api>
+- AGC components and connectivity / egress — <https://learn.microsoft.com/azure/application-gateway/for-containers/application-gateway-for-containers-components#connectivity>
+- Azure WAF on Application Gateway for Containers — <https://learn.microsoft.com/azure/application-gateway/for-containers/web-application-firewall-overview>
+- Cilium HTTP-aware policy concepts — <https://docs.cilium.io/en/stable/security/policy/language/#http>
 
 ---
 
